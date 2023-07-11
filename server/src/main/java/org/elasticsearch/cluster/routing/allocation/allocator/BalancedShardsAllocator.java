@@ -870,10 +870,14 @@ public class BalancedShardsAllocator implements ShardsAllocator {
             do {
                 for (int i = 0; i < primaryLength; i++) {
                     ShardRouting shard = primary[i];
+                    // try 1
                     final AllocateUnassignedDecision allocationDecision = decideAllocateUnassigned(shard);
+
                     final String assignedNodeId = allocationDecision.getTargetNode() != null
                         ? allocationDecision.getTargetNode().getId()
                         : null;
+
+
                     final ModelNode minNode = assignedNodeId != null ? nodes.get(assignedNodeId) : null;
 
                     if (allocationDecision.getAllocationDecision() == AllocationDecision.YES) {
@@ -889,6 +893,7 @@ public class BalancedShardsAllocator implements ShardsAllocator {
                             allocation.metadata(),
                             allocation.routingTable()
                         );
+
                         shard = routingNodes.initializeShard(shard, minNode.getNodeId(), null, shardSize, allocation.changes());
                         minNode.addShard(shard);
                         if (shard.primary() == false) {
@@ -898,20 +903,24 @@ public class BalancedShardsAllocator implements ShardsAllocator {
                                 secondary[secondaryLength++] = primary[++i];
                             }
                         }
-                    } else {
-                        // did *not* receive a YES decision
-                        if (logger.isTraceEnabled()) {
-                            logger.trace(
-                                "No eligible node found to assign shard [{}] allocation_status [{}]",
-                                shard,
-                                allocationDecision.getAllocationStatus()
-                            );
-                        }
+                    }
+                    else {
+                        // trying again
+                        final AllocateUnassignedDecision retryAllocationDecision = decideAllocateUnassigned(shard);
+                        final String assignedNodeId1 = retryAllocationDecision.getTargetNode() != null
+                            ? retryAllocationDecision.getTargetNode().getId()
+                            : null;
 
-                        if (minNode != null) {
-                            // throttle decision scenario
-                            assert allocationDecision.getAllocationStatus() == AllocationStatus.DECIDERS_THROTTLED;
-                            final long shardSize = DiskThresholdDecider.getExpectedShardSize(
+
+                        final ModelNode retryMinNode = assignedNodeId1 != null ? nodes.get(assignedNodeId1) : null;
+                        if (retryAllocationDecision.getAllocationDecision() == AllocationDecision.YES) {
+
+                            // received a yes this time
+                            if (logger.isTraceEnabled()) {
+                                logger.trace("Assigned shard [{}] to [{}] on second try", shard, retryMinNode.getNodeId());
+                            }
+
+                            final long newShardSize = DiskThresholdDecider.getExpectedShardSize(
                                 shard,
                                 ShardRouting.UNAVAILABLE_EXPECTED_SHARD_SIZE,
                                 allocation.clusterInfo(),
@@ -919,18 +928,51 @@ public class BalancedShardsAllocator implements ShardsAllocator {
                                 allocation.metadata(),
                                 allocation.routingTable()
                             );
-                            minNode.addShard(shard.initialize(minNode.getNodeId(), null, shardSize));
-                        } else {
-                            if (logger.isTraceEnabled()) {
-                                logger.trace("No Node found to assign shard [{}]", shard);
+
+                            // initialize the shards now
+                            shard = routingNodes.initializeShard(shard, retryMinNode.getNodeId(), null, newShardSize, allocation.changes());
+                            retryMinNode.addShard(shard);
+                            if (shard.primary() == false) {
+                                // copy over the same replica shards to the secondary array so they will get allocated
+                                // in a subsequent iteration, allowing replicas of other shards to be allocated first
+                                while (i < primaryLength - 1 && comparator.compare(primary[i], primary[i + 1]) == 0) {
+                                    secondary[secondaryLength++] = primary[++i];
+                                }
                             }
                         }
+                        else {
+                            if (logger.isTraceEnabled()) {
+                                logger.trace(
+                                    "No eligible node found to assign shard [{}] allocation_status [{}]",
+                                    shard,
+                                    allocationDecision.getAllocationStatus()
+                                );
+                            }
 
-                        unassigned.ignoreShard(shard, allocationDecision.getAllocationStatus(), allocation.changes());
-                        if (shard.primary() == false) {
-                            // we could not allocate it and we are a replica - check if we can ignore the other replicas
-                            while (i < primaryLength - 1 && comparator.compare(primary[i], primary[i + 1]) == 0) {
-                                unassigned.ignoreShard(primary[++i], allocationDecision.getAllocationStatus(), allocation.changes());
+                            if (retryMinNode != null) {
+                                // throttle decision scenario
+                                assert retryAllocationDecision.getAllocationStatus() == AllocationStatus.DECIDERS_THROTTLED;
+                                final long shardSize = DiskThresholdDecider.getExpectedShardSize(
+                                    shard,
+                                    ShardRouting.UNAVAILABLE_EXPECTED_SHARD_SIZE,
+                                    allocation.clusterInfo(),
+                                    allocation.snapshotShardSizeInfo(),
+                                    allocation.metadata(),
+                                    allocation.routingTable()
+                                );
+                                retryMinNode.addShard(shard.initialize(retryMinNode.getNodeId(), null, shardSize));
+                            } else {
+                                if (logger.isTraceEnabled()) {
+                                    logger.trace("No Node found to assign shard [{}]", shard);
+                                }
+                            }
+
+                            unassigned.ignoreShard(shard, retryAllocationDecision.getAllocationStatus(), allocation.changes());
+                            if (shard.primary() == false) {
+                                // we could not allocate it and we are a replica - check if we can ignore the other replicas
+                                while (i < primaryLength - 1 && comparator.compare(primary[i], primary[i + 1]) == 0) {
+                                    unassigned.ignoreShard(primary[++i], allocationDecision.getAllocationStatus(), allocation.changes());
+                                }
                             }
                         }
                     }

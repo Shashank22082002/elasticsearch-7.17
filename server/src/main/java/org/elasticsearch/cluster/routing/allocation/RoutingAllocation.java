@@ -15,6 +15,7 @@ import org.elasticsearch.cluster.metadata.Metadata;
 import org.elasticsearch.cluster.metadata.SingleNodeShutdownMetadata;
 import org.elasticsearch.cluster.node.DiscoveryNodes;
 import org.elasticsearch.cluster.routing.RoutingChangesObserver;
+import org.elasticsearch.cluster.routing.RoutingNode;
 import org.elasticsearch.cluster.routing.RoutingNodes;
 import org.elasticsearch.cluster.routing.RoutingTable;
 import org.elasticsearch.cluster.routing.ShardRouting;
@@ -58,6 +59,9 @@ public class RoutingAllocation {
     private final SnapshotShardSizeInfo shardSizeInfo;
 
     private Map<ShardId, Set<String>> ignoredShardToNodes = null;
+
+    // stores (shard, node) pair for which limits should be ignored.
+    private final Map<ShardRouting, Map<RoutingNode, Boolean>> runWithoutShardLimits = new HashMap<>();
 
     private boolean ignoreDisable = false;
 
@@ -150,6 +154,21 @@ public class RoutingAllocation {
         return metadata;
     }
 
+    public void setRunWithoutShardLimits(ShardRouting shard, RoutingNode node, Boolean val) {
+        // initialize the flag for shard, node to null
+        if (runWithoutShardLimits.containsKey(shard)) {
+            runWithoutShardLimits.get(shard).put(node, val);
+        } else {
+            HashMap<RoutingNode, Boolean> nodeMap = new HashMap<>();
+            nodeMap.put(node, val);
+            runWithoutShardLimits.put(shard, nodeMap);
+        }
+    }
+
+    public Boolean getRunWithoutShardLimits(ShardRouting shard, RoutingNode node) {
+        return runWithoutShardLimits.getOrDefault(shard, new HashMap<>()).getOrDefault(node, null);
+    }
+
     /**
      * Get discovery nodes in current routing
      * @return discovery nodes
@@ -219,6 +238,8 @@ public class RoutingAllocation {
         }
         ignoredShardToNodes.computeIfAbsent(shardId, k -> new HashSet<>()).add(nodeId);
     }
+
+
 
     /**
      * Returns whether the given node id should be ignored from consideration when {@link AllocationDeciders}

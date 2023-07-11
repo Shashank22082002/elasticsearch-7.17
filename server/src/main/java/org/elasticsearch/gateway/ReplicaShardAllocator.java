@@ -166,11 +166,16 @@ public abstract class ReplicaShardAllocator extends BaseGatewayShardAllocator {
         if (allocateDecision.type() != Decision.Type.YES && (explain == false || hasInitiatedFetching(unassignedShard) == false)) {
             // only return early if we are not in explain mode, or we are in explain mode but we have not
             // yet attempted to fetch any shard data
-            logger.trace("{}: ignoring allocation, can't be allocated on any node", unassignedShard);
-            return AllocateUnassignedDecision.no(
-                UnassignedInfo.AllocationStatus.fromDecision(allocateDecision.type()),
-                result.v2() != null ? new ArrayList<>(result.v2().values()) : null
-            );
+            // probe here again...
+            result = canBeAllocatedToAtLeastOneNode(unassignedShard, allocation);
+            allocateDecision = result.v1();
+            if (allocateDecision.type() != Decision.Type.YES && (explain == false || hasInitiatedFetching(unassignedShard) == false)) {
+                logger.trace("{}: ignoring allocation, can't be allocated on any node", unassignedShard);
+                return AllocateUnassignedDecision.no(
+                    UnassignedInfo.AllocationStatus.fromDecision(allocateDecision.type()),
+                    result.v2() != null ? new ArrayList<>(result.v2().values()) : null
+                );
+            }
         }
 
         AsyncShardFetch.FetchResult<NodeStoreFilesMetadata> shardStores = fetchData(unassignedShard, allocation);

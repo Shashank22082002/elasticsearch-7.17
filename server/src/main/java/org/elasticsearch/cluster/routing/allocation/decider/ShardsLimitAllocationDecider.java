@@ -46,6 +46,8 @@ public class ShardsLimitAllocationDecider extends AllocationDecider {
 
     private volatile int clusterShardLimit;
 
+    private volatile int softenLimit;
+
     /**
      * Controls the maximum number of shards per index on a single Elasticsearch
      * node. Negative values are interpreted as unlimited.
@@ -70,16 +72,30 @@ public class ShardsLimitAllocationDecider extends AllocationDecider {
         Property.NodeScope
     );
 
+    public static final Setting<Integer> SOFTEN_IF_UNASSIGNED_SHARDS_SETTING = Setting.intSetting(
+        "cluster.routing.allocation.soften_limit",
+        -1,
+        -1,
+        Property.Dynamic,
+        Property.NodeScope
+    );
+
     private final Settings settings;
 
     public ShardsLimitAllocationDecider(Settings settings, ClusterSettings clusterSettings) {
         this.settings = settings;
         this.clusterShardLimit = CLUSTER_TOTAL_SHARDS_PER_NODE_SETTING.get(settings);
+        this.softenLimit = SOFTEN_IF_UNASSIGNED_SHARDS_SETTING.get(settings);
         clusterSettings.addSettingsUpdateConsumer(CLUSTER_TOTAL_SHARDS_PER_NODE_SETTING, this::setClusterShardLimit);
+        clusterSettings.addSettingsUpdateConsumer(SOFTEN_IF_UNASSIGNED_SHARDS_SETTING, this::setSoftenLimit);
     }
 
     private void setClusterShardLimit(int clusterShardLimit) {
         this.clusterShardLimit = clusterShardLimit;
+    }
+
+    private void setSoftenLimit(int softenLimit) {
+        this.softenLimit = softenLimit;
     }
 
     @Override
@@ -104,8 +120,11 @@ public class ShardsLimitAllocationDecider extends AllocationDecider {
         // Capture the limit here in case it changes during this method's
         // execution
         final int clusterShardLimit = this.clusterShardLimit;
+        Boolean runWithoutShardLimits = allocation.getRunWithoutShardLimits(shardRouting, node);
 
-        if (indexShardLimit <= 0 && clusterShardLimit <= 0) {
+        if ((indexShardLimit <= 0 && clusterShardLimit <= 0) || (softenLimit > 0 && runWithoutShardLimits != null && runWithoutShardLimits)) {
+            if (softenLimit > 0)
+                allocation.setRunWithoutShardLimits(shardRouting, node, false);
             return allocation.decision(
                 Decision.YES,
                 NAME,
@@ -118,6 +137,8 @@ public class ShardsLimitAllocationDecider extends AllocationDecider {
         final int nodeShardCount = node.numberOfOwningShards();
 
         if (clusterShardLimit > 0 && decider.test(nodeShardCount, clusterShardLimit)) {
+            if (softenLimit > 0)
+                allocation.setRunWithoutShardLimits(shardRouting, node, true);
             return allocation.decision(
                 Decision.NO,
                 NAME,
@@ -130,6 +151,8 @@ public class ShardsLimitAllocationDecider extends AllocationDecider {
         if (indexShardLimit > 0) {
             final int indexShardCount = node.numberOfOwningShardsForIndex(shardRouting.index());
             if (decider.test(indexShardCount, indexShardLimit)) {
+                if (softenLimit > 0)
+                    allocation.setRunWithoutShardLimits(shardRouting, node, true);
                 return allocation.decision(
                     Decision.NO,
                     NAME,

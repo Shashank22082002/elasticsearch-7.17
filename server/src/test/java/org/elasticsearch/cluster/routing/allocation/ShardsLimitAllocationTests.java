@@ -19,13 +19,17 @@ import org.elasticsearch.cluster.node.DiscoveryNodes;
 import org.elasticsearch.cluster.routing.RoutingTable;
 import org.elasticsearch.cluster.routing.ShardRouting;
 import org.elasticsearch.cluster.routing.ShardRoutingState;
+import org.elasticsearch.cluster.routing.UnassignedInfo;
 import org.elasticsearch.cluster.routing.allocation.decider.ShardsLimitAllocationDecider;
 import org.elasticsearch.common.settings.Settings;
 
+import static org.elasticsearch.cluster.routing.RoutingNodesHelper.shardsWithState;
 import static org.elasticsearch.cluster.routing.ShardRoutingState.RELOCATING;
 import static org.elasticsearch.cluster.routing.ShardRoutingState.STARTED;
+import static org.elasticsearch.cluster.routing.ShardRoutingState.UNASSIGNED;
 import static org.elasticsearch.cluster.routing.allocation.RoutingNodesUtils.numberOfShardsOfType;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.greaterThan;
 
 public class ShardsLimitAllocationTests extends ESAllocationTestCase {
     private final Logger logger = LogManager.getLogger(ShardsLimitAllocationTests.class);
@@ -74,6 +78,360 @@ public class ShardsLimitAllocationTests extends ESAllocationTestCase {
         logger.info("Do another reroute, make sure its still not allocated");
         startInitializingShardsAndReroute(strategy, clusterState);
     }
+
+
+    public void testIndexLevelShardsLimitAllocateWhileSoftLimits() {
+        AllocationService strategy = createAllocationService(
+            Settings.builder()
+                .put("cluster.routing.allocation.node_concurrent_recoveries", 10)
+                .put(ShardsLimitAllocationDecider.SOFTEN_IF_UNASSIGNED_SHARDS_SETTING.getKey(), 1)
+                .build()
+        );
+        logger.info("Building initial routing table");
+        Metadata metadata = Metadata.builder()
+            .put(
+                IndexMetadata.builder("test")
+                    .settings(
+                        settings(Version.CURRENT).put(IndexMetadata.SETTING_NUMBER_OF_SHARDS, 3)
+                            .put(IndexMetadata.SETTING_NUMBER_OF_REPLICAS, 1)
+                            .put(ShardsLimitAllocationDecider.INDEX_TOTAL_SHARDS_PER_NODE_SETTING.getKey(), 1)
+                    )
+            )
+            .build();
+        RoutingTable routingTable = RoutingTable.builder().addAsNew(metadata.index("test")).build();
+        ClusterState clusterState = ClusterState.builder(
+            org.elasticsearch.cluster.ClusterName.CLUSTER_NAME_SETTING.getDefault(Settings.EMPTY)
+        ).metadata(metadata).routingTable(routingTable).build();
+        logger.info("Adding two nodes and performing rerouting");
+        clusterState = ClusterState.builder(clusterState)
+            .nodes(DiscoveryNodes.builder().add(newNode("node1")).add(newNode("node2")))
+            .build();
+        clusterState = strategy.reroute(clusterState, "reroute");
+
+        assertThat(clusterState.getRoutingNodes().node("node1").numberOfShardsWithState(ShardRoutingState.INITIALIZING) + clusterState.getRoutingNodes().node("node2").numberOfShardsWithState(ShardRoutingState.INITIALIZING), equalTo(3));
+
+        logger.info("Start the primary shards");
+        clusterState = startInitializingShardsAndReroute(strategy, clusterState);
+
+        assertThat(clusterState.getRoutingNodes().node("node1").numberOfShardsWithState(ShardRoutingState.INITIALIZING) + clusterState.getRoutingNodes().node("node2").numberOfShardsWithState(ShardRoutingState.INITIALIZING), equalTo(3));
+        assertThat(clusterState.getRoutingNodes().node("node1").numberOfShardsWithState(ShardRoutingState.STARTED) + clusterState.getRoutingNodes().node("node2").numberOfShardsWithState(ShardRoutingState.STARTED), equalTo(3));
+        assertThat(clusterState.getRoutingNodes().unassigned().size(), equalTo(0));
+
+        logger.info("Do another reroute, make sure its still not allocated");
+    }
+
+    public void testIndexLevelShardsLimitAllocateWhileSoftLimitsSingleNode() {
+        AllocationService strategy = createAllocationService(
+            Settings.builder()
+                .put("cluster.routing.allocation.node_concurrent_recoveries", 10)
+                .put(ShardsLimitAllocationDecider.SOFTEN_IF_UNASSIGNED_SHARDS_SETTING.getKey(), 1)
+                .build()
+        );
+        logger.info("Building initial routing table");
+        Metadata metadata = Metadata.builder()
+            .put(
+                IndexMetadata.builder("test")
+                    .settings(
+                        settings(Version.CURRENT).put(IndexMetadata.SETTING_NUMBER_OF_SHARDS, 3)
+                            .put(IndexMetadata.SETTING_NUMBER_OF_REPLICAS, 1)
+                            .put(ShardsLimitAllocationDecider.INDEX_TOTAL_SHARDS_PER_NODE_SETTING.getKey(), 1)
+                    )
+            )
+            .build();
+        RoutingTable routingTable = RoutingTable.builder().addAsNew(metadata.index("test")).build();
+        ClusterState clusterState = ClusterState.builder(
+            org.elasticsearch.cluster.ClusterName.CLUSTER_NAME_SETTING.getDefault(Settings.EMPTY)
+        ).metadata(metadata).routingTable(routingTable).build();
+        logger.info("Adding two nodes and performing rerouting");
+        clusterState = ClusterState.builder(clusterState)
+            .nodes(DiscoveryNodes.builder().add(newNode("node1")))
+            .build();
+        clusterState = strategy.reroute(clusterState, "reroute");
+
+        assertThat(clusterState.getRoutingNodes().node("node1").numberOfShardsWithState(ShardRoutingState.INITIALIZING) , equalTo(3));
+
+        logger.info("Start the primary shards");
+        clusterState = startInitializingShardsAndReroute(strategy, clusterState);
+
+        assertThat(clusterState.getRoutingNodes().node("node1").numberOfShardsWithState(ShardRoutingState.STARTED) , equalTo(3));
+        assertThat(clusterState.getRoutingNodes().unassigned().size(), equalTo(3));
+
+        logger.info("Do another reroute, make sure its still not allocated");
+    }
+
+    public void testIndexLevelShardsLimitAllocateSoftLimitsRandomised() {
+        // note that you have to increase throttling limit to allow allocation for primary > 4
+        AllocationService strategy = createAllocationService(
+            Settings.builder()
+                .put("cluster.routing.allocation.node_concurrent_recoveries", 100)
+                .put("cluster.routing.allocation.node_initial_primaries_recoveries", 100) // allows 100 shard simultaneously to be unallocated on a node
+                .put(ShardsLimitAllocationDecider.SOFTEN_IF_UNASSIGNED_SHARDS_SETTING.getKey(), 1)
+                .build()
+        );
+        logger.info("Building initial routing table");
+        int randomShards = 2*randomIntBetween(1, 20);
+        Metadata metadata = Metadata.builder()
+            .put(
+                IndexMetadata.builder("test")
+                    .settings(
+                        settings(Version.CURRENT).put(IndexMetadata.SETTING_NUMBER_OF_SHARDS, randomShards)
+                            .put(IndexMetadata.SETTING_NUMBER_OF_REPLICAS, 1)
+                            .put(ShardsLimitAllocationDecider.INDEX_TOTAL_SHARDS_PER_NODE_SETTING.getKey(), 4)
+                    )
+            )
+            .build();
+        RoutingTable routingTable = RoutingTable.builder().addAsNew(metadata.index("test")).build();
+        ClusterState clusterState = ClusterState.builder(
+            org.elasticsearch.cluster.ClusterName.CLUSTER_NAME_SETTING.getDefault(Settings.EMPTY)
+        ).metadata(metadata).routingTable(routingTable).build();
+        logger.info("Adding two nodes and performing rerouting");
+        clusterState = ClusterState.builder(clusterState)
+            .nodes(DiscoveryNodes.builder().add(newNode("node1")).add(newNode("node2")))
+            .build();
+
+        clusterState = strategy.reroute(clusterState, "reroute");
+//        System.out.println("Total unassigned nodes right now are : " + clusterState.getRoutingNodes().node("node1").numberOfShardsWithState(ShardRoutingState.INITIALIZING));
+        assertThat(clusterState.getRoutingNodes().node("node1").numberOfShardsWithState(ShardRoutingState.INITIALIZING), equalTo(randomShards/2));
+        assertThat(clusterState.getRoutingNodes().node("node2").numberOfShardsWithState(ShardRoutingState.INITIALIZING), equalTo(randomShards/2));
+
+        logger.info("Start the primary shards");
+        clusterState = startInitializingShardsAndReroute(strategy, clusterState);
+
+        assertThat(clusterState.getRoutingNodes().node("node1").numberOfShardsWithState(ShardRoutingState.STARTED), equalTo(randomShards/2));
+        assertThat(clusterState.getRoutingNodes().node("node1").numberOfShardsWithState(ShardRoutingState.INITIALIZING), equalTo(randomShards/2));
+        assertThat(clusterState.getRoutingNodes().node("node2").numberOfShardsWithState(ShardRoutingState.STARTED), equalTo(randomShards/2));
+        assertThat(clusterState.getRoutingNodes().node("node2").numberOfShardsWithState(ShardRoutingState.INITIALIZING), equalTo(randomShards/2));
+        assertThat(clusterState.getRoutingNodes().unassigned().size(), equalTo(0));
+
+    }
+
+    public void testSoftLimitsRandomised() {
+        AllocationService strategy = createAllocationService(
+            Settings.builder()
+                .put("cluster.routing.allocation.node_concurrent_recoveries", 100)
+                .put("cluster.routing.allocation.node_initial_primaries_recoveries", 1000) // allows 250 shard simultaneously to be unallocated on a node
+                .put(ShardsLimitAllocationDecider.SOFTEN_IF_UNASSIGNED_SHARDS_SETTING.getKey(), 1)
+                .build()
+        );
+        logger.info("Building initial routing table");
+        int randomShards = 2*randomIntBetween(1, 20);
+        int randomReplicas = randomIntBetween(1, 5);
+        int randomLimit = randomIntBetween(2, 40);
+
+        Metadata metadata = Metadata.builder()
+            .put(
+                IndexMetadata.builder("test")
+                    .settings(
+                        settings(Version.CURRENT).put(IndexMetadata.SETTING_NUMBER_OF_SHARDS, randomShards)
+                            .put(IndexMetadata.SETTING_NUMBER_OF_REPLICAS, randomReplicas)
+                            .put(ShardsLimitAllocationDecider.INDEX_TOTAL_SHARDS_PER_NODE_SETTING.getKey(), randomLimit)
+                    )
+            )
+            .build();
+        RoutingTable routingTable = RoutingTable.builder().addAsNew(metadata.index("test")).build();
+        ClusterState clusterState = ClusterState.builder(
+            org.elasticsearch.cluster.ClusterName.CLUSTER_NAME_SETTING.getDefault(Settings.EMPTY)
+        ).metadata(metadata).routingTable(routingTable).build();
+        clusterState = ClusterState.builder(clusterState)
+            .nodes(DiscoveryNodes.builder().add(newNode("node1")).add(newNode("node2")).add(newNode("node3")).add(newNode("node4")).add(newNode("node5")).add(newNode("node6")))
+            .build();
+
+        clusterState = strategy.reroute(clusterState, "reroute");
+        int initializingNodes = 0;
+        for(int i = 1; i <= 6; ++i ) {
+            String nodeID = "node" + i;
+            initializingNodes += clusterState.getRoutingNodes().node(nodeID).numberOfShardsWithState(ShardRoutingState.INITIALIZING);
+        }
+        assertThat(initializingNodes, equalTo(randomShards));
+
+        logger.info("Start the primary shards");
+        clusterState = startInitializingShardsAndReroute(strategy, clusterState);
+
+        int replicasInitializingCount = 0, primaryStartedCount = 0;
+        for(int i = 1; i <= 6; ++i ) {
+            String nodeID = "node" + i;
+            primaryStartedCount += clusterState.getRoutingNodes().node(nodeID).numberOfShardsWithState(ShardRoutingState.STARTED);
+            replicasInitializingCount += clusterState.getRoutingNodes().node(nodeID).numberOfShardsWithState(ShardRoutingState.INITIALIZING);
+        }
+        assertThat(replicasInitializingCount, equalTo(randomShards * randomReplicas));
+        assertThat(initializingNodes, equalTo(primaryStartedCount));
+        assertThat(clusterState.getRoutingNodes().unassigned().size(), equalTo(0));
+
+        logger.info("Do another reroute, make sure its still not allocated");
+    }
+
+    public void testClusterLevelShardsLimitAllocateOnNodeLeft() {
+        AllocationService strategy = createAllocationService(
+            Settings.builder()
+                .put("cluster.routing.allocation.node_concurrent_recoveries", 10)
+                .put(ShardsLimitAllocationDecider.CLUSTER_TOTAL_SHARDS_PER_NODE_SETTING.getKey(), 1)
+                .put(ShardsLimitAllocationDecider.SOFTEN_IF_UNASSIGNED_SHARDS_SETTING.getKey(), 1)
+                .build()
+        );
+        logger.info("Building initial routing table");
+
+        Metadata metadata = Metadata.builder()
+            .put(
+                IndexMetadata.builder("test")
+                    .settings(
+                        settings(Version.CURRENT).put(IndexMetadata.SETTING_NUMBER_OF_SHARDS, 2)
+                            .put(IndexMetadata.SETTING_NUMBER_OF_REPLICAS, 0)
+                            .put(UnassignedInfo.INDEX_DELAYED_NODE_LEFT_TIMEOUT_SETTING.getKey(), 0)
+                    )
+            )
+            .build();
+
+        RoutingTable routingTable = RoutingTable.builder().addAsNew(metadata.index("test")).build();
+
+        ClusterState clusterState = ClusterState.builder(
+            org.elasticsearch.cluster.ClusterName.CLUSTER_NAME_SETTING.getDefault(Settings.EMPTY)
+        ).metadata(metadata).routingTable(routingTable).build();
+
+        logger.info("Adding two nodes and performing rerouting");
+        clusterState = ClusterState.builder(clusterState)
+            .nodes(DiscoveryNodes.builder().add(newNode("node1")).add(newNode("node2")))
+            .build();
+        clusterState = strategy.reroute(clusterState, "reroute");
+
+        assertThat(clusterState.getRoutingNodes().node("node1").numberOfShardsWithState(ShardRoutingState.INITIALIZING), equalTo(1));
+        assertThat(clusterState.getRoutingNodes().node("node2").numberOfShardsWithState(ShardRoutingState.INITIALIZING), equalTo(1));
+
+        logger.info("Start the primary shards");
+        clusterState = startInitializingShardsAndReroute(strategy, clusterState);
+
+        assertThat(clusterState.getRoutingNodes().node("node1").numberOfShardsWithState(ShardRoutingState.STARTED), equalTo(1));
+        assertThat(clusterState.getRoutingNodes().node("node2").numberOfShardsWithState(ShardRoutingState.STARTED), equalTo(1));
+        assertThat(clusterState.getRoutingNodes().unassigned().size(), equalTo(0));
+//        clusterState = startInitializingShardsAndReroute(strategy, clusterState);
+//        assertThat(clusterState.getRoutingNodes().node("node1").numberOfShardsWithState(ShardRoutingState.STARTED), equalTo(2));
+//        assertThat(clusterState.getRoutingNodes().node("node2").numberOfShardsWithState(ShardRoutingState.STARTED), equalTo(2));
+
+//        // Bump the cluster total shards to 2
+//        strategy = createAllocationService(
+//            Settings.builder()
+//                .put("cluster.routing.allocation.node_concurrent_recoveries", 10)
+//                .put(ShardsLimitAllocationDecider.CLUSTER_TOTAL_SHARDS_PER_NODE_SETTING.getKey(), 2)
+//                .put(ShardsLimitAllocationDecider.SOFTEN_IF_UNASSIGNED_SHARDS_SETTING.getKey(), 1)
+//                .build()
+//        );
+
+//        logger.info("Do another reroute, make sure shards are now allocated");
+//        clusterState = strategy.reroute(clusterState, "reroute");
+//
+//        assertThat(clusterState.getRoutingNodes().node("node1").numberOfShardsWithState(ShardRoutingState.INITIALIZING), equalTo(1));
+//        assertThat(clusterState.getRoutingNodes().node("node2").numberOfShardsWithState(ShardRoutingState.INITIALIZING), equalTo(1));
+//
+//        clusterState = startInitializingShardsAndReroute(strategy, clusterState);
+//
+//        assertThat(clusterState.getRoutingNodes().node("node1").numberOfShardsWithState(ShardRoutingState.STARTED), equalTo(2));
+//        assertThat(clusterState.getRoutingNodes().node("node2").numberOfShardsWithState(ShardRoutingState.STARTED), equalTo(2));
+//        assertThat(clusterState.getRoutingNodes().unassigned().size(), equalTo(0));
+
+        // what if node 2 leaves
+        clusterState = ClusterState.builder(clusterState).nodes(DiscoveryNodes.builder(clusterState.nodes()).remove("node2")).build();
+        clusterState = strategy.disassociateDeadNodes(clusterState, true, "reroute");
+        // verify that NODE_LEAVE is the reason for meta
+        assertThat(clusterState.getRoutingNodes().unassigned().size() > 0, equalTo(true));
+        assertThat(shardsWithState(clusterState.getRoutingNodes(), UNASSIGNED).size(), equalTo(1));
+
+
+        assertThat(
+            shardsWithState(clusterState.getRoutingNodes(), UNASSIGNED).get(0).unassignedInfo().getReason(),
+            equalTo(UnassignedInfo.Reason.NODE_LEFT)
+        );
+
+        assertThat(
+            shardsWithState(clusterState.getRoutingNodes(), UNASSIGNED).get(0).unassignedInfo().getUnassignedTimeInMillis(),
+            greaterThan(0L)
+        );
+        clusterState = strategy.reroute(clusterState, "reroute");
+        int init = clusterState.getRoutingNodes().node("node1").numberOfShardsWithState(ShardRoutingState.INITIALIZING);
+        int relocating = clusterState.getRoutingNodes().node("node1").numberOfShardsWithState(ShardRoutingState.RELOCATING);
+        int unassigned = shardsWithState(clusterState.getRoutingNodes(), UNASSIGNED).size();
+        int started = clusterState.getRoutingNodes().node("node1").numberOfShardsWithState(STARTED);
+        System.out.println("Total shards of all states : " );
+        System.out.println("INITIALISING " + init);
+        System.out.println("RELOCATING " + relocating);
+        System.out.println("UNASSIGNED " + unassigned);
+        System.out.println("STARTED " + started);
+    }
+
+    public void testClusterLevelShardsLimitAllocateOnNodeLeft3nodes2Shards() {
+        AllocationService strategy = createAllocationService(
+            Settings.builder()
+                .put("cluster.routing.allocation.node_concurrent_recoveries", 10)
+                .put(ShardsLimitAllocationDecider.CLUSTER_TOTAL_SHARDS_PER_NODE_SETTING.getKey(), 1)
+                .put(ShardsLimitAllocationDecider.SOFTEN_IF_UNASSIGNED_SHARDS_SETTING.getKey(), 1)
+                .build()
+        );
+        logger.info("Building initial routing table");
+
+        Metadata metadata = Metadata.builder()
+            .put(
+                IndexMetadata.builder("test")
+                    .settings(
+                        settings(Version.CURRENT).put(IndexMetadata.SETTING_NUMBER_OF_SHARDS, 2)
+                            .put(IndexMetadata.SETTING_NUMBER_OF_REPLICAS, 1)
+                            .put(UnassignedInfo.INDEX_DELAYED_NODE_LEFT_TIMEOUT_SETTING.getKey(), 0)
+                    )
+            )
+            .build();
+
+        RoutingTable routingTable = RoutingTable.builder().addAsNew(metadata.index("test")).build();
+
+        ClusterState clusterState = ClusterState.builder(
+            org.elasticsearch.cluster.ClusterName.CLUSTER_NAME_SETTING.getDefault(Settings.EMPTY)
+        ).metadata(metadata).routingTable(routingTable).build();
+
+        logger.info("Adding two nodes and performing rerouting");
+        clusterState = ClusterState.builder(clusterState)
+            .nodes(DiscoveryNodes.builder().add(newNode("node1")).add(newNode("node2")).add(newNode("node3")))
+            .build();
+        clusterState = strategy.reroute(clusterState, "reroute");
+        System.out.println("First rerouting done, count of shards initialising on node1, node 2, node 3 is " +  clusterState.getRoutingNodes().node("node1").numberOfShardsWithState(ShardRoutingState.INITIALIZING) + " "
+            + clusterState.getRoutingNodes().node("node2").numberOfShardsWithState(ShardRoutingState.INITIALIZING) + " " + clusterState.getRoutingNodes().node("node3").numberOfShardsWithState(ShardRoutingState.INITIALIZING));
+
+        assertThat(clusterState.getRoutingNodes().node("node2").numberOfShardsWithState(ShardRoutingState.INITIALIZING), equalTo(1));
+        assertThat(clusterState.getRoutingNodes().node("node3").numberOfShardsWithState(ShardRoutingState.INITIALIZING), equalTo(1));
+
+        logger.info("Start the primary shards");
+        clusterState = startInitializingShardsAndReroute(strategy, clusterState);
+        System.out.println("Initialised old primary shards, count of shards initialising on node1, node 2, node 3 is " +  clusterState.getRoutingNodes().node("node1").numberOfShardsWithState(ShardRoutingState.INITIALIZING) + " "
+            + clusterState.getRoutingNodes().node("node2").numberOfShardsWithState(ShardRoutingState.INITIALIZING) + " " + clusterState.getRoutingNodes().node("node3").numberOfShardsWithState(ShardRoutingState.INITIALIZING));
+        System.out.println("Initialised old primary shards, count of shards started on node1, node 2, node 3 is " +  clusterState.getRoutingNodes().node("node1").numberOfShardsWithState(ShardRoutingState.STARTED) + " "
+            + clusterState.getRoutingNodes().node("node2").numberOfShardsWithState(ShardRoutingState.STARTED) + " " + clusterState.getRoutingNodes().node("node3").numberOfShardsWithState(ShardRoutingState.STARTED));
+
+        assertThat(clusterState.getRoutingNodes().node("node2").numberOfShardsWithState(ShardRoutingState.STARTED), equalTo(1));
+        assertThat(clusterState.getRoutingNodes().node("node3").numberOfShardsWithState(ShardRoutingState.STARTED), equalTo(1));
+        assertThat(clusterState.getRoutingNodes().unassigned().size(), equalTo(0));
+
+        clusterState = startInitializingShardsAndReroute(strategy, clusterState);
+        System.out.println("Started all replicas as well");
+        assertThat(clusterState.getRoutingNodes().node("node1").numberOfShardsWithState(ShardRoutingState.STARTED), equalTo(2));
+        assertThat(clusterState.getRoutingNodes().node("node2").numberOfShardsWithState(ShardRoutingState.STARTED), equalTo(1));
+
+
+        // what if node 1 leaves
+        clusterState = ClusterState.builder(clusterState).nodes(DiscoveryNodes.builder(clusterState.nodes()).remove("node1")).build();
+        System.out.println("Node 1 left, disassociating Dead nodes");
+        clusterState = strategy.disassociateDeadNodes(clusterState, true, "reroute");
+        // verify that NODE_LEAVE is the reason for meta
+        System.out.println(clusterState.getRoutingNodes().unassigned().getNumPrimaries());
+//        assertThat(clusterState.getRoutingNodes().unassigned().size() > 0, equalTo(true));
+        assertThat(shardsWithState(clusterState.getRoutingNodes(), UNASSIGNED).size(), equalTo(0));
+
+        clusterState = strategy.reroute(clusterState, "reroute");
+        int init = clusterState.getRoutingNodes().node("node2").numberOfShardsWithState(ShardRoutingState.INITIALIZING);
+        int relocating = clusterState.getRoutingNodes().node("node2").numberOfShardsWithState(ShardRoutingState.RELOCATING);
+//        int unassigned = shardsWithState(clusterState.getRoutingNodes(), UNASSIGNED).size();
+//        int started = clusterState.getRoutingNodes().node("node1").numberOfShardsWithState(STARTED);
+        System.out.println("Total shards of all states : " );
+        System.out.println("INITIALISING " + init);
+        System.out.println("RELOCATING " + relocating);
+//        System.out.println("UNASSIGNED " + unassigned);
+//        System.out.println("STARTED " + started);
+    }
+
 
     public void testClusterLevelShardsLimitAllocate() {
         AllocationService strategy = createAllocationService(
