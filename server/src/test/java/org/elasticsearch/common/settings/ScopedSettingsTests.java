@@ -767,6 +767,9 @@ public class ScopedSettingsTests extends ESTestCase {
         setting = settings.get("cluster.routing.allocation.total_shards_per_node");
         assertEquals(setting, ShardsLimitAllocationDecider.CLUSTER_TOTAL_SHARDS_PER_NODE_SETTING);
 
+        setting = settings.get("cluster.routing.allocation.soften_limit");
+        assertEquals(setting, ShardsLimitAllocationDecider.SOFTEN_IF_UNASSIGNED_SHARDS_SETTING);
+
         // array settings - complex matcher
         assertNotNull(settings.get("transport.tracer.include." + randomIntBetween(1, 100)));
         assertSame(TransportSettings.TRACE_LOG_INCLUDE_SETTING, settings.get("transport.tracer.include." + randomIntBetween(1, 100)));

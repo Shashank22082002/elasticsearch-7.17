@@ -302,30 +302,6 @@ public class ShardsLimitAllocationTests extends ESAllocationTestCase {
         assertThat(clusterState.getRoutingNodes().node("node1").numberOfShardsWithState(ShardRoutingState.STARTED), equalTo(1));
         assertThat(clusterState.getRoutingNodes().node("node2").numberOfShardsWithState(ShardRoutingState.STARTED), equalTo(1));
         assertThat(clusterState.getRoutingNodes().unassigned().size(), equalTo(0));
-//        clusterState = startInitializingShardsAndReroute(strategy, clusterState);
-//        assertThat(clusterState.getRoutingNodes().node("node1").numberOfShardsWithState(ShardRoutingState.STARTED), equalTo(2));
-//        assertThat(clusterState.getRoutingNodes().node("node2").numberOfShardsWithState(ShardRoutingState.STARTED), equalTo(2));
-
-//        // Bump the cluster total shards to 2
-//        strategy = createAllocationService(
-//            Settings.builder()
-//                .put("cluster.routing.allocation.node_concurrent_recoveries", 10)
-//                .put(ShardsLimitAllocationDecider.CLUSTER_TOTAL_SHARDS_PER_NODE_SETTING.getKey(), 2)
-//                .put(ShardsLimitAllocationDecider.SOFTEN_IF_UNASSIGNED_SHARDS_SETTING.getKey(), 1)
-//                .build()
-//        );
-
-//        logger.info("Do another reroute, make sure shards are now allocated");
-//        clusterState = strategy.reroute(clusterState, "reroute");
-//
-//        assertThat(clusterState.getRoutingNodes().node("node1").numberOfShardsWithState(ShardRoutingState.INITIALIZING), equalTo(1));
-//        assertThat(clusterState.getRoutingNodes().node("node2").numberOfShardsWithState(ShardRoutingState.INITIALIZING), equalTo(1));
-//
-//        clusterState = startInitializingShardsAndReroute(strategy, clusterState);
-//
-//        assertThat(clusterState.getRoutingNodes().node("node1").numberOfShardsWithState(ShardRoutingState.STARTED), equalTo(2));
-//        assertThat(clusterState.getRoutingNodes().node("node2").numberOfShardsWithState(ShardRoutingState.STARTED), equalTo(2));
-//        assertThat(clusterState.getRoutingNodes().unassigned().size(), equalTo(0));
 
         // what if node 2 leaves
         clusterState = ClusterState.builder(clusterState).nodes(DiscoveryNodes.builder(clusterState.nodes()).remove("node2")).build();
@@ -417,19 +393,17 @@ public class ShardsLimitAllocationTests extends ESAllocationTestCase {
         clusterState = strategy.disassociateDeadNodes(clusterState, true, "reroute");
         // verify that NODE_LEAVE is the reason for meta
         System.out.println(clusterState.getRoutingNodes().unassigned().getNumPrimaries());
-//        assertThat(clusterState.getRoutingNodes().unassigned().size() > 0, equalTo(true));
+
         assertThat(shardsWithState(clusterState.getRoutingNodes(), UNASSIGNED).size(), equalTo(0));
 
         clusterState = strategy.reroute(clusterState, "reroute");
         int init = clusterState.getRoutingNodes().node("node2").numberOfShardsWithState(ShardRoutingState.INITIALIZING);
         int relocating = clusterState.getRoutingNodes().node("node2").numberOfShardsWithState(ShardRoutingState.RELOCATING);
-//        int unassigned = shardsWithState(clusterState.getRoutingNodes(), UNASSIGNED).size();
-//        int started = clusterState.getRoutingNodes().node("node1").numberOfShardsWithState(STARTED);
+
         System.out.println("Total shards of all states : " );
         System.out.println("INITIALISING " + init);
         System.out.println("RELOCATING " + relocating);
-//        System.out.println("UNASSIGNED " + unassigned);
-//        System.out.println("STARTED " + started);
+
     }
 
 

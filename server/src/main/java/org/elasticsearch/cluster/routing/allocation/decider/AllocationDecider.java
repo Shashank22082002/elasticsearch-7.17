@@ -139,4 +139,8 @@ public abstract class AllocationDecider {
     public Decision canAllocateReplicaWhenThereIsRetentionLease(ShardRouting shardRouting, RoutingNode node, RoutingAllocation allocation) {
         return canAllocate(shardRouting, node, allocation);
     }
+
+    public Decision canAllocateWithSoftShardLimits(ShardRouting shardRouting, RoutingNode node, RoutingAllocation allocation) {
+        return canAllocate(shardRouting, node, allocation);
+    }
 }

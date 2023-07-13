@@ -25,7 +25,7 @@ import java.util.function.BiPredicate;
  * index or node-wide basis. The allocator prevents a single node to hold more
  * than {@code index.routing.allocation.total_shards_per_node} per index and
  * {@code cluster.routing.allocation.total_shards_per_node} globally during the allocation
- * process. The limits of this decider can be changed in real-time via a the
+ * process. The limits of this decider can be changed in real-time via the
  * index settings API.
  * <p>
  * If {@code index.routing.allocation.total_shards_per_node} is reset to a negative value shards
@@ -45,7 +45,6 @@ public class ShardsLimitAllocationDecider extends AllocationDecider {
     public static final String NAME = "shards_limit";
 
     private volatile int clusterShardLimit;
-
     private volatile int softenLimit;
 
     /**
@@ -93,10 +92,7 @@ public class ShardsLimitAllocationDecider extends AllocationDecider {
     private void setClusterShardLimit(int clusterShardLimit) {
         this.clusterShardLimit = clusterShardLimit;
     }
-
-    private void setSoftenLimit(int softenLimit) {
-        this.softenLimit = softenLimit;
-    }
+    private void setSoftenLimit(int softenLimit) { this.softenLimit = softenLimit; }
 
     @Override
     public Decision canAllocate(ShardRouting shardRouting, RoutingNode node, RoutingAllocation allocation) {
@@ -104,9 +100,23 @@ public class ShardsLimitAllocationDecider extends AllocationDecider {
     }
 
     @Override
+    public Decision canAllocateWithSoftShardLimits(ShardRouting shardRouting, RoutingNode node, RoutingAllocation allocation) {
+
+        if (softenLimit > 0) {
+            return allocation.decision(
+                Decision.YES,
+                NAME,
+                "softening of limits is enabled: [softenLimit: %d] > 0.",
+                softenLimit,
+                clusterShardLimit
+            );
+        }
+        return canAllocate(shardRouting, node, allocation);
+    }
+
+    @Override
     public Decision canRemain(ShardRouting shardRouting, RoutingNode node, RoutingAllocation allocation) {
         return doDecide(shardRouting, node, allocation, (count, limit) -> count > limit);
-
     }
 
     private Decision doDecide(
@@ -115,16 +125,14 @@ public class ShardsLimitAllocationDecider extends AllocationDecider {
         RoutingAllocation allocation,
         BiPredicate<Integer, Integer> decider
     ) {
+
         IndexMetadata indexMd = allocation.metadata().getIndexSafe(shardRouting.index());
         final int indexShardLimit = INDEX_TOTAL_SHARDS_PER_NODE_SETTING.get(indexMd.getSettings(), settings);
         // Capture the limit here in case it changes during this method's
         // execution
         final int clusterShardLimit = this.clusterShardLimit;
-        Boolean runWithoutShardLimits = allocation.getRunWithoutShardLimits(shardRouting, node);
 
-        if ((indexShardLimit <= 0 && clusterShardLimit <= 0) || (softenLimit > 0 && runWithoutShardLimits != null && runWithoutShardLimits)) {
-            if (softenLimit > 0)
-                allocation.setRunWithoutShardLimits(shardRouting, node, false);
+        if (indexShardLimit <= 0 && clusterShardLimit <= 0) {
             return allocation.decision(
                 Decision.YES,
                 NAME,
@@ -135,10 +143,7 @@ public class ShardsLimitAllocationDecider extends AllocationDecider {
         }
 
         final int nodeShardCount = node.numberOfOwningShards();
-
         if (clusterShardLimit > 0 && decider.test(nodeShardCount, clusterShardLimit)) {
-            if (softenLimit > 0)
-                allocation.setRunWithoutShardLimits(shardRouting, node, true);
             return allocation.decision(
                 Decision.NO,
                 NAME,
@@ -151,8 +156,6 @@ public class ShardsLimitAllocationDecider extends AllocationDecider {
         if (indexShardLimit > 0) {
             final int indexShardCount = node.numberOfOwningShardsForIndex(shardRouting.index());
             if (decider.test(indexShardCount, indexShardLimit)) {
-                if (softenLimit > 0)
-                    allocation.setRunWithoutShardLimits(shardRouting, node, true);
                 return allocation.decision(
                     Decision.NO,
                     NAME,

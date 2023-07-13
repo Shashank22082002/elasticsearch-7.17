@@ -29,8 +29,15 @@ public class AllocationDeciders extends AllocationDecider {
 
     private final Collection<AllocationDecider> allocations;
 
+    /**
+     * creating a reference of ShardLimitAllocationDecider
+     * so we won't have to fetch it from allocations while checking limits in canAllocateWithoutBreakingLimits
+     */
+    private final AllocationDecider shardLimitAllocationDecider;
+
     public AllocationDeciders(Collection<AllocationDecider> allocations) {
         this.allocations = Collections.unmodifiableCollection(allocations);
+        this.shardLimitAllocationDecider = findShardLimitAllocationDecider();
     }
 
     @Override
@@ -57,6 +64,7 @@ public class AllocationDeciders extends AllocationDecider {
         if (allocation.shouldIgnoreShardForNode(shardRouting.shardId(), node.nodeId())) {
             return Decision.NO;
         }
+        // here
         Decision.Multi ret = new Decision.Multi();
         for (AllocationDecider allocationDecider : allocations) {
             Decision decision = allocationDecider.canAllocate(shardRouting, node, allocation);
@@ -82,6 +90,70 @@ public class AllocationDeciders extends AllocationDecider {
         }
         return ret;
     }
+
+    public AllocationDecider findShardLimitAllocationDecider() {
+        for (AllocationDecider decider: allocations) {
+            if (decider instanceof ShardsLimitAllocationDecider)
+                return decider;
+        }
+        return null;
+    }
+
+    public Decision canAllocateWithoutBreakingShardLimits(ShardRouting shardRouting, RoutingNode node, RoutingAllocation allocation) {
+
+        if (allocation.shouldIgnoreShardForNode(shardRouting.shardId(), node.nodeId())) {
+            return Decision.NO;
+        }
+
+        if (shardLimitAllocationDecider == null) {
+            // if shard limit is not a decider, we can return YES;
+            return Decision.YES;
+        }
+
+        Decision decision = shardLimitAllocationDecider.canAllocate(shardRouting, node, allocation);
+        if (decision.type() == Decision.Type.NO) {
+            if (logger.isTraceEnabled()) {
+                logger.trace(
+                    "Can not allocate [{}] on node [{}] due to [{}]. Would retry allocation if softening is enabled",
+                    shardRouting,
+                    node.node(),
+                    shardLimitAllocationDecider.getClass().getSimpleName()
+                );
+            }
+        }
+        return decision;
+    }
+
+    public Decision canAllocateWithSofterShardLimits(ShardRouting shardRouting, RoutingNode node, RoutingAllocation allocation) {
+        if (allocation.shouldIgnoreShardForNode(shardRouting.shardId(), node.nodeId())) {
+            return Decision.NO;
+        }
+        Decision.Multi ret = new Decision.Multi();
+        for (AllocationDecider allocationDecider : allocations) {
+            Decision decision = allocationDecider.canAllocateWithSoftShardLimits(shardRouting, node, allocation);
+            // short track if a NO is returned.
+            if (decision.type() == Decision.Type.NO) {
+                if (logger.isTraceEnabled()) {
+                    logger.trace(
+                        "Can not allocate [{}] on node [{}] due to [{}]",
+                        shardRouting,
+                        node.node(),
+                        allocationDecider.getClass().getSimpleName()
+                    );
+                }
+                // short circuit only if debugging is not enabled
+                if (allocation.debugDecision() == false) {
+                    return Decision.NO;
+                } else {
+                    ret.add(decision);
+                }
+            } else {
+                addDecision(ret, decision, allocation);
+            }
+        }
+        return ret;
+    }
+
 
     @Override
     public Decision canRemain(ShardRouting shardRouting, RoutingNode node, RoutingAllocation allocation) {
@@ -118,6 +190,7 @@ public class AllocationDeciders extends AllocationDecider {
 
     @Override
     public Decision canAllocate(IndexMetadata indexMetadata, RoutingNode node, RoutingAllocation allocation) {
+        // shard level allocate decision
         Decision.Multi ret = new Decision.Multi();
         for (AllocationDecider allocationDecider : allocations) {
             Decision decision = allocationDecider.canAllocate(indexMetadata, node, allocation);
@@ -251,6 +324,31 @@ public class AllocationDeciders extends AllocationDecider {
         Decision.Multi ret = new Decision.Multi();
         for (AllocationDecider allocationDecider : allocations) {
             Decision decision = allocationDecider.canAllocateReplicaWhenThereIsRetentionLease(shardRouting, node, allocation);
+            // short track if a NO is returned.
+            if (decision.type() == Decision.Type.NO) {
+                if (allocation.debugDecision() == false) {
+                    return Decision.NO;
+                } else {
+                    ret.add(decision);
+                }
+            } else {
+                addDecision(ret, decision, allocation);
+            }
+        }
+        return ret;
+    }
+
+    public Decision canAllocateReplicaWhenThereIsRetentionLeaseWithSoftLimits(ShardRouting shardRouting, RoutingNode node, RoutingAllocation allocation) {
+        if (allocation.shouldIgnoreShardForNode(shardRouting.shardId(), node.nodeId())) {
+            return Decision.NO;
+        }
+        Decision.Multi ret = new Decision.Multi();
+        for (AllocationDecider allocationDecider : allocations) {
+            Decision decision;
+            if (allocationDecider instanceof ShardsLimitAllocationDecider)
+                decision = allocationDecider.canAllocateWithSoftShardLimits(shardRouting, node, allocation);
+            else
+                decision = allocationDecider.canAllocateReplicaWhenThereIsRetentionLease(shardRouting, node, allocation);
             // short track if a NO is returned.
             if (decision.type() == Decision.Type.NO) {
                 if (allocation.debugDecision() == false) {
