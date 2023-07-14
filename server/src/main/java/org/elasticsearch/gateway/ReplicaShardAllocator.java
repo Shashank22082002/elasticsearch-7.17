@@ -300,8 +300,8 @@ public abstract class ReplicaShardAllocator extends BaseGatewayShardAllocator {
         Decision madeDecision = Decision.NO;
         final boolean explain = allocation.debugDecision();
         Map<String, NodeAllocationResult> nodeDecisions = explain ? new HashMap<>() : null;
-        List<DiscoveryNode> ShardLimitsFailed = new ArrayList<>();
-        List<DiscoveryNode> ShardLimitsPassed = new ArrayList<>();
+        List<DiscoveryNode> nodesWhereShardLimitsFailed = new ArrayList<>();
+        List<DiscoveryNode> nodesWhereShardLimitsPassed = new ArrayList<>();
 
         for (DiscoveryNode discoveryNode: allocation.nodes().getDataNodes().values()) {
             RoutingNode node = allocation.routingNodes().node(discoveryNode.getId());
@@ -310,12 +310,12 @@ public abstract class ReplicaShardAllocator extends BaseGatewayShardAllocator {
             }
             Decision shardLimitDecision = allocation.deciders().canAllocateWithoutBreakingShardLimits(shard, node, allocation);
             if (shardLimitDecision.type() == Decision.Type.NO) {
-                ShardLimitsFailed.add(discoveryNode);
+                nodesWhereShardLimitsFailed.add(discoveryNode);
             } else {
-                ShardLimitsPassed.add(discoveryNode);
+                nodesWhereShardLimitsPassed.add(discoveryNode);
             }
         }
-        for (DiscoveryNode discoveryNode : ShardLimitsPassed) {
+        for (DiscoveryNode discoveryNode : nodesWhereShardLimitsPassed) {
             RoutingNode node = allocation.routingNodes().node(discoveryNode.getId());
             // if we can't allocate it on a node, ignore it, for example, this handles
             // cases for only allocating a replica after a primary
@@ -334,7 +334,7 @@ public abstract class ReplicaShardAllocator extends BaseGatewayShardAllocator {
             }
         }
 
-        for (DiscoveryNode discoveryNode : ShardLimitsFailed) {
+        for (DiscoveryNode discoveryNode : nodesWhereShardLimitsFailed) {
             RoutingNode node = allocation.routingNodes().node(discoveryNode.getId());
             // if we can't allocate it on a node, ignore it, for example, this handles
             // cases for only allocating a replica after a primary
@@ -404,8 +404,8 @@ public abstract class ReplicaShardAllocator extends BaseGatewayShardAllocator {
         Map<DiscoveryNode, MatchingNode> matchingNodes = new HashMap<>();
         Map<String, NodeAllocationResult> nodeDecisions = explain ? new HashMap<>() : null;
         List<Map.Entry<DiscoveryNode, NodeStoreFilesMetadata>>
-            ShardLimitsPassed= new ArrayList<>(),
-            ShardLimitsFailed = new ArrayList<>();
+            nodesWhereShardLimitsPassed= new ArrayList<>(),
+            nodesWhereShardLimitsFailed = new ArrayList<>();
 
         for (Map.Entry<DiscoveryNode, NodeStoreFilesMetadata> nodeStoreEntry : data.getData().entrySet()) {
             DiscoveryNode discoNode = nodeStoreEntry.getKey();
@@ -426,13 +426,13 @@ public abstract class ReplicaShardAllocator extends BaseGatewayShardAllocator {
             }
             Decision decision = allocation.deciders().canAllocateWithoutBreakingShardLimits(shard, node, allocation);
             if (decision.type() == Decision.Type.NO) {
-                ShardLimitsFailed.add(nodeStoreEntry);
+                nodesWhereShardLimitsFailed.add(nodeStoreEntry);
             } else {
-                ShardLimitsPassed.add(nodeStoreEntry);
+                nodesWhereShardLimitsPassed.add(nodeStoreEntry);
             }
         }
 
-        for (Map.Entry<DiscoveryNode, NodeStoreFilesMetadata> nodeStoreEntry : ShardLimitsPassed) {
+        for (Map.Entry<DiscoveryNode, NodeStoreFilesMetadata> nodeStoreEntry : nodesWhereShardLimitsPassed) {
             DiscoveryNode discoNode = nodeStoreEntry.getKey();
             TransportNodesListShardStoreMetadata.StoreFilesMetadata storeFilesMetadata = nodeStoreEntry.getValue().storeFilesMetadata();
             RoutingNode node = allocation.routingNodes().node(discoNode.getId());
@@ -488,11 +488,10 @@ public abstract class ReplicaShardAllocator extends BaseGatewayShardAllocator {
         }
         if (matchingNodes.isEmpty()) {
             // we didn't find a matching node, maybe softening limits, we can find one
-            for (Map.Entry<DiscoveryNode, NodeStoreFilesMetadata> nodeStoreEntry : ShardLimitsFailed) {
+            for (Map.Entry<DiscoveryNode, NodeStoreFilesMetadata> nodeStoreEntry : nodesWhereShardLimitsFailed) {
                 DiscoveryNode discoNode = nodeStoreEntry.getKey();
 
                 TransportNodesListShardStoreMetadata.StoreFilesMetadata storeFilesMetadata = nodeStoreEntry.getValue().storeFilesMetadata();
-
                 RoutingNode node = allocation.routingNodes().node(discoNode.getId());
 
                 // Check whether we have existing data for the replica

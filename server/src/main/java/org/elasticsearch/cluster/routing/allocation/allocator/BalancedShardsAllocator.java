@@ -991,15 +991,23 @@ public class BalancedShardsAllocator implements ShardsAllocator {
                 return AllocateUnassignedDecision.no(AllocationStatus.DECIDERS_NO, null);
             }
 
-            List<ModelNode> ShardLimitsFailed = new ArrayList<>();
-            List<ModelNode> ShardLimitsPassed = new ArrayList<>();
+            List<ModelNode> nodesWhereShardLimitsFailed = new ArrayList<>();
+            List<ModelNode> nodesWhereShardLimitsPassed = new ArrayList<>();
+            Map<String, NodeAllocationResult> nodeExplanationMap = explain ? new HashMap<>() : null;
+            List<Tuple<String, Float>> nodeWeights = explain ? new ArrayList<>() : null;
 
+            // segregate nodes in classes where shard limits failed or shard limits passed
             for (ModelNode node : nodes.values()) {
                 Decision shardLimitDecision = allocation.deciders().canAllocateWithoutBreakingShardLimits(shard, node.getRoutingNode(), allocation);
                 if (shardLimitDecision.type() == Type.NO) {
-                    ShardLimitsFailed.add(node);
+                    if (explain) {
+                        float currentWeight = weight.weight(this, node, shard.getIndexName());
+                        nodeExplanationMap.put(node.getNodeId(), new NodeAllocationResult(node.getRoutingNode().node(), shardLimitDecision, 0));
+                        nodeWeights.add(Tuple.tuple(node.getNodeId(), currentWeight));
+                    }
+                    nodesWhereShardLimitsFailed.add(node);
                 } else {
-                    ShardLimitsPassed.add(node);
+                    nodesWhereShardLimitsPassed.add(node);
                 }
             }
             /* find an node with minimal weight we can allocate on*/
@@ -1008,9 +1016,8 @@ public class BalancedShardsAllocator implements ShardsAllocator {
             Decision decision = null;
             /* Don't iterate over an identity hashset here the
              * iteration order is different for each run and makes testing hard */
-            Map<String, NodeAllocationResult> nodeExplanationMap = explain ? new HashMap<>() : null;
-            List<Tuple<String, Float>> nodeWeights = explain ? new ArrayList<>() : null;
-            for (ModelNode node : ShardLimitsPassed) {
+
+            for (ModelNode node : nodesWhereShardLimitsPassed) {
                 if (node.containsShard(shard) && explain == false) {
                     // decision is NO without needing to check anything further, so short circuit
                     continue;
@@ -1078,8 +1085,8 @@ public class BalancedShardsAllocator implements ShardsAllocator {
                 return AllocateUnassignedDecision.fromDecision(decision, minNode != null ? minNode.routingNode.node() : null, nodeDecisions);
             }
 
-            // go with other nodes, softening limits if it is enabled
-            for (ModelNode node: ShardLimitsFailed) {
+            // go with other nodes, softening limits if the setting is enabled
+            for (ModelNode node: nodesWhereShardLimitsFailed) {
                 if (node.containsShard(shard) && explain == false) {
                     // decision is NO without needing to check anything further, so short circuit
                     continue;
@@ -1093,6 +1100,7 @@ public class BalancedShardsAllocator implements ShardsAllocator {
 
                 Decision currentDecision = allocation.deciders().canAllocateWithSofterShardLimits(shard, node.getRoutingNode(), allocation);
                 if (explain) {
+                    // in explain mode we need to add all decisions. here we will add the decision with softening if it is enabled
                     nodeExplanationMap.put(node.getNodeId(), new NodeAllocationResult(node.getRoutingNode().node(), currentDecision, 0));
                     nodeWeights.add(Tuple.tuple(node.getNodeId(), currentWeight));
                 }
@@ -1112,6 +1120,7 @@ public class BalancedShardsAllocator implements ShardsAllocator {
                         updateMinNode = true;
                     }
                     if (updateMinNode) {
+                        // updating minimum node found as above.
                         minNode = node;
                         minWeight = currentWeight;
                         decision = currentDecision;

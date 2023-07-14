@@ -107,8 +107,7 @@ public class ShardsLimitAllocationDecider extends AllocationDecider {
                 Decision.YES,
                 NAME,
                 "softening of limits is enabled: [softenLimit: %d] > 0.",
-                softenLimit,
-                clusterShardLimit
+                softenLimit
             );
         }
         return canAllocate(shardRouting, node, allocation);
