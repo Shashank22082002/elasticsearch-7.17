@@ -45,7 +45,7 @@ public class ShardsLimitAllocationDecider extends AllocationDecider {
     public static final String NAME = "shards_limit";
 
     private volatile int clusterShardLimit;
-    private volatile int softenLimit;
+    private volatile int softenShardLimit;
 
     /**
      * Controls the maximum number of shards per index on a single Elasticsearch
@@ -84,15 +84,15 @@ public class ShardsLimitAllocationDecider extends AllocationDecider {
     public ShardsLimitAllocationDecider(Settings settings, ClusterSettings clusterSettings) {
         this.settings = settings;
         this.clusterShardLimit = CLUSTER_TOTAL_SHARDS_PER_NODE_SETTING.get(settings);
-        this.softenLimit = SOFTEN_IF_UNASSIGNED_SHARDS_SETTING.get(settings);
+        this.softenShardLimit = SOFTEN_IF_UNASSIGNED_SHARDS_SETTING.get(settings);
         clusterSettings.addSettingsUpdateConsumer(CLUSTER_TOTAL_SHARDS_PER_NODE_SETTING, this::setClusterShardLimit);
-        clusterSettings.addSettingsUpdateConsumer(SOFTEN_IF_UNASSIGNED_SHARDS_SETTING, this::setSoftenLimit);
+        clusterSettings.addSettingsUpdateConsumer(SOFTEN_IF_UNASSIGNED_SHARDS_SETTING, this::setSoftenShardLimit);
     }
 
     private void setClusterShardLimit(int clusterShardLimit) {
         this.clusterShardLimit = clusterShardLimit;
     }
-    private void setSoftenLimit(int softenLimit) { this.softenLimit = softenLimit; }
+    private void setSoftenShardLimit(int softenShardLimit) { this.softenShardLimit = softenShardLimit; }
 
     @Override
     public Decision canAllocate(ShardRouting shardRouting, RoutingNode node, RoutingAllocation allocation) {
@@ -102,12 +102,12 @@ public class ShardsLimitAllocationDecider extends AllocationDecider {
     @Override
     public Decision canAllocateWithSoftShardLimits(ShardRouting shardRouting, RoutingNode node, RoutingAllocation allocation) {
 
-        if (softenLimit > 0) {
+        if (softenShardLimit > 0) {
             return allocation.decision(
                 Decision.YES,
                 NAME,
                 "softening of limits is enabled: [softenLimit: %d] > 0.",
-                softenLimit
+                softenShardLimit
             );
         }
         return canAllocate(shardRouting, node, allocation);

@@ -965,17 +965,17 @@ public class BalancedShardsAllocator implements ShardsAllocator {
          * For all unassigned shard
          *     For all nodes
          *         If checkLimits(node, shard) is false
-         *             ShardLimitsFailed.add(node)
+         *             shardLimitsFailed.add(node)
          *         Else
-         *             ShardLimitsPassed.add(node)
+         *             shardLimitsPassed.add(node)
          *
-         *     For all nodes in ShardLimitPassed
+         *     For all nodes in shardLimitPassed
          *         If canAllocate(shard, node) is true
          *             add node to list.
          *
          *     If list is empty
-         *     For all nodes in ShardLimitFailed
-         *         If canAllocate(shard, node) is true
+         *     For all nodes in shardLimitFailed
+         *         If canAllocateWithSofterShardLimits(shard, node) is true
          *             Add node to list
          */
         private AllocateUnassignedDecision decideAllocateUnassigned(final ShardRouting shard) {
@@ -1036,31 +1036,7 @@ public class BalancedShardsAllocator implements ShardsAllocator {
                     nodeWeights.add(Tuple.tuple(node.getNodeId(), currentWeight));
                 }
                 if (currentDecision.type() == Type.YES || currentDecision.type() == Type.THROTTLE) {
-                    final boolean updateMinNode;
-                    if (currentWeight == minWeight) {
-                        /*  we have an equal weight tie breaking:
-                         *  1. if one decision is YES prefer it
-                         *  2. prefer the node that holds the primary for this index with the next id in the ring ie.
-                         *  for the 3 shards 2 replica case we try to build up:
-                         *    1 2 0
-                         *    2 0 1
-                         *    0 1 2
-                         *  such that if we need to tie-break we try to prefer the node holding a shard with the minimal id greater
-                         *  than the id of the shard we need to assign. This works find when new indices are created since
-                         *  primaries are added first and we only add one shard set a time in this algorithm.
-                         */
-                        if (currentDecision.type() == decision.type()) {
-                            final int repId = shard.id();
-                            final int nodeHigh = node.highestPrimary(shard.index().getName());
-                            final int minNodeHigh = minNode.highestPrimary(shard.getIndexName());
-                            updateMinNode = ((((nodeHigh > repId && minNodeHigh > repId) || (nodeHigh < repId && minNodeHigh < repId))
-                                && (nodeHigh < minNodeHigh)) || (nodeHigh > repId && minNodeHigh < repId));
-                        } else {
-                            updateMinNode = currentDecision.type() == Type.YES;
-                        }
-                    } else {
-                        updateMinNode = true;
-                    }
+                    final boolean updateMinNode = checkIfMinNodeUpdated(currentWeight, minWeight, decision, currentDecision, node, minNode, shard);
                     if (updateMinNode) {
                         minNode = node;
                         minWeight = currentWeight;
@@ -1073,14 +1049,7 @@ public class BalancedShardsAllocator implements ShardsAllocator {
                 // if some decision could be set without breaking Limits
                 List<NodeAllocationResult> nodeDecisions = null;
                 if (explain) {
-                    nodeDecisions = new ArrayList<>();
-                    // fill in the correct weight ranking, once we've been through all nodes
-                    nodeWeights.sort((nodeWeight1, nodeWeight2) -> Float.compare(nodeWeight1.v2(), nodeWeight2.v2()));
-                    int weightRanking = 0;
-                    for (Tuple<String, Float> nodeWeight : nodeWeights) {
-                        NodeAllocationResult current = nodeExplanationMap.get(nodeWeight.v1());
-                        nodeDecisions.add(new NodeAllocationResult(current.getNode(), current.getCanAllocateDecision(), ++weightRanking));
-                    }
+                    nodeDecisions = getNodeAllocationResults(nodeWeights, nodeExplanationMap);
                 }
                 return AllocateUnassignedDecision.fromDecision(decision, minNode != null ? minNode.routingNode.node() : null, nodeDecisions);
             }
@@ -1105,20 +1074,7 @@ public class BalancedShardsAllocator implements ShardsAllocator {
                     nodeWeights.add(Tuple.tuple(node.getNodeId(), currentWeight));
                 }
                 if (currentDecision.type() == Type.YES || currentDecision.type() == Type.THROTTLE) {
-                    final boolean updateMinNode;
-                    if (currentWeight == minWeight) {
-                        if (currentDecision.type() == decision.type()) {
-                            final int repId = shard.id();
-                            final int nodeHigh = node.highestPrimary(shard.index().getName());
-                            final int minNodeHigh = minNode.highestPrimary(shard.getIndexName());
-                            updateMinNode = ((((nodeHigh > repId && minNodeHigh > repId) || (nodeHigh < repId && minNodeHigh < repId))
-                                && (nodeHigh < minNodeHigh)) || (nodeHigh > repId && minNodeHigh < repId));
-                        } else {
-                            updateMinNode = currentDecision.type() == Type.YES;
-                        }
-                    } else {
-                        updateMinNode = true;
-                    }
+                    final boolean updateMinNode = checkIfMinNodeUpdated(currentWeight, minWeight, decision, currentDecision, node, minNode, shard);
                     if (updateMinNode) {
                         // updating minimum node found as above.
                         minNode = node;
@@ -1131,18 +1087,53 @@ public class BalancedShardsAllocator implements ShardsAllocator {
                 // decision was not set and a node was not assigned, so treat it as a NO decision
                 decision = Decision.NO;
             }
+
             List<NodeAllocationResult> nodeDecisions = null;
             if (explain) {
-                nodeDecisions = new ArrayList<>();
-                // fill in the correct weight ranking, once we've been through all nodes
-                nodeWeights.sort((nodeWeight1, nodeWeight2) -> Float.compare(nodeWeight1.v2(), nodeWeight2.v2()));
-                int weightRanking = 0;
-                for (Tuple<String, Float> nodeWeight : nodeWeights) {
-                    NodeAllocationResult current = nodeExplanationMap.get(nodeWeight.v1());
-                    nodeDecisions.add(new NodeAllocationResult(current.getNode(), current.getCanAllocateDecision(), ++weightRanking));
-                }
+                nodeDecisions = getNodeAllocationResults(nodeWeights, nodeExplanationMap);
             }
             return AllocateUnassignedDecision.fromDecision(decision, minNode != null ? minNode.routingNode.node() : null, nodeDecisions);
+        }
+
+        private List<NodeAllocationResult> getNodeAllocationResults(List<Tuple<String, Float>> nodeWeights, Map<String, NodeAllocationResult> nodeExplanationMap) {
+            List<NodeAllocationResult> nodeDecisions = new ArrayList<>();
+            // fill in the correct weight ranking, once we've been through all nodes
+            nodeWeights.sort((nodeWeight1, nodeWeight2) -> Float.compare(nodeWeight1.v2(), nodeWeight2.v2()));
+            int weightRanking = 0;
+            for (Tuple<String, Float> nodeWeight : nodeWeights) {
+                NodeAllocationResult current = nodeExplanationMap.get(nodeWeight.v1());
+                nodeDecisions.add(new NodeAllocationResult(current.getNode(), current.getCanAllocateDecision(), ++weightRanking));
+            }
+            return nodeDecisions;
+        }
+
+        private boolean checkIfMinNodeUpdated(float currentWeight, float minWeight, Decision decision, Decision currentDecision, ModelNode node, ModelNode minNode, final ShardRouting shard) {
+            final boolean updateMinNode;
+            if (currentWeight == minWeight) {
+                /*  we have an equal weight tie breaking:
+                 *  1. if one decision is YES prefer it
+                 *  2. prefer the node that holds the primary for this index with the next id in the ring ie.
+                 *  for the 3 shards 2 replica case we try to build up:
+                 *    1 2 0
+                 *    2 0 1
+                 *    0 1 2
+                 *  such that if we need to tie-break we try to prefer the node holding a shard with the minimal id greater
+                 *  than the id of the shard we need to assign. This works find when new indices are created since
+                 *  primaries are added first and we only add one shard set a time in this algorithm.
+                 */
+                if (currentDecision.type() == decision.type()) {
+                    final int repId = shard.id();
+                    final int nodeHigh = node.highestPrimary(shard.index().getName());
+                    final int minNodeHigh = minNode.highestPrimary(shard.getIndexName());
+                    updateMinNode = ((((nodeHigh > repId && minNodeHigh > repId) || (nodeHigh < repId && minNodeHigh < repId))
+                        && (nodeHigh < minNodeHigh)) || (nodeHigh > repId && minNodeHigh < repId));
+                } else {
+                    updateMinNode = currentDecision.type() == Type.YES;
+                }
+            } else {
+                updateMinNode = true;
+            }
+            return updateMinNode;
         }
 
         private static final Comparator<ShardRouting> BY_DESCENDING_SHARD_ID = Comparator.comparing(ShardRouting::shardId).reversed();
@@ -1197,6 +1188,8 @@ public class BalancedShardsAllocator implements ShardsAllocator {
         }
 
     }
+
+
 
     static class ModelNode implements Iterable<ModelIndex> {
         private final Map<String, ModelIndex> indices = new HashMap<>();

@@ -338,7 +338,7 @@ public abstract class ReplicaShardAllocator extends BaseGatewayShardAllocator {
             RoutingNode node = allocation.routingNodes().node(discoveryNode.getId());
             // if we can't allocate it on a node, ignore it, for example, this handles
             // cases for only allocating a replica after a primary
-            Decision decision = allocation.deciders().canAllocateReplicaWhenThereIsRetentionLeaseWithSoftLimits(shard, node, allocation);
+            Decision decision = allocation.deciders().canAllocateReplicaWhenThereIsRetentionLeaseWithSofterShardLimits(shard, node, allocation);
             if (decision.type() == Decision.Type.YES && madeDecision.type() != Decision.Type.YES) {
                 if (explain) {
                     madeDecision = decision;
@@ -391,6 +391,10 @@ public abstract class ReplicaShardAllocator extends BaseGatewayShardAllocator {
         return nodeFilesStore.storeFilesMetadata();
     }
 
+    /**
+     * Finds matching Nodes for a given shardRouting
+     * follows similar algorithm for finding nodes as unassigned shard Allocation methods.
+     */
 
     private MatchingNodes findMatchingNodes(
         ShardRouting shard,
@@ -466,24 +470,7 @@ public abstract class ReplicaShardAllocator extends BaseGatewayShardAllocator {
             }
             matchingNodes.put(discoNode, matchingNode);
             if (logger.isTraceEnabled()) {
-                if (matchingNode.isNoopRecovery) {
-                    logger.trace("{}: node [{}] can perform a noop recovery", shard, discoNode.getName());
-                } else if (matchingNode.retainingSeqNo >= 0) {
-                    logger.trace(
-                        "{}: node [{}] can perform operation-based recovery with retaining sequence number [{}]",
-                        shard,
-                        discoNode.getName(),
-                        matchingNode.retainingSeqNo
-                    );
-                } else {
-                    logger.trace(
-                        "{}: node [{}] has [{}/{}] bytes of re-usable data",
-                        shard,
-                        discoNode.getName(),
-                        new ByteSizeValue(matchingNode.matchingBytes),
-                        matchingNode.matchingBytes
-                    );
-                }
+                printMatchingNodeLoggerTrace(matchingNode, shard, discoNode);
             }
         }
         if (matchingNodes.isEmpty()) {
@@ -502,8 +489,8 @@ public abstract class ReplicaShardAllocator extends BaseGatewayShardAllocator {
                     // There is no existing replica data on the node
                     decision = allocation.deciders().canAllocateWithSofterShardLimits(shard, node, allocation);
                 } else {
-                    // There is existing replica data on the node
-                    decision = allocation.deciders().canAllocateReplicaWhenThereIsRetentionLeaseWithSoftLimits(shard, node, allocation);
+                    // There is existing replica data on the node -- retention lease + soft shard limits
+                    decision = allocation.deciders().canAllocateReplicaWhenThereIsRetentionLeaseWithSofterShardLimits(shard, node, allocation);
                 }
 
                 MatchingNode matchingNode = null;
@@ -512,40 +499,40 @@ public abstract class ReplicaShardAllocator extends BaseGatewayShardAllocator {
                     ShardStoreInfo shardStoreInfo = new ShardStoreInfo(matchingNode.matchingBytes);
                     nodeDecisions.put(node.nodeId(), new NodeAllocationResult(discoNode, shardStoreInfo, decision));
                 }
-
-                // we only check for NO, since if this node is THROTTLING and it has enough "same data"
-                // then we will try and assign it next time
                 if (decision.type() == Decision.Type.NO) {
                     continue;
                 }
-
                 if (matchingNode == null) {
                     matchingNode = computeMatchingNode(primaryNode, primaryStore, discoNode, storeFilesMetadata);
                 }
                 matchingNodes.put(discoNode, matchingNode);
                 if (logger.isTraceEnabled()) {
-                    if (matchingNode.isNoopRecovery) {
-                        logger.trace("{}: node [{}] can perform a noop recovery", shard, discoNode.getName());
-                    } else if (matchingNode.retainingSeqNo >= 0) {
-                        logger.trace(
-                            "{}: node [{}] can perform operation-based recovery with retaining sequence number [{}]",
-                            shard,
-                            discoNode.getName(),
-                            matchingNode.retainingSeqNo
-                        );
-                    } else {
-                        logger.trace(
-                            "{}: node [{}] has [{}/{}] bytes of re-usable data",
-                            shard,
-                            discoNode.getName(),
-                            new ByteSizeValue(matchingNode.matchingBytes),
-                            matchingNode.matchingBytes
-                        );
-                    }
+                    printMatchingNodeLoggerTrace(matchingNode, shard, discoNode);
                 }
             }
         }
         return new MatchingNodes(matchingNodes, nodeDecisions);
+    }
+
+    private void printMatchingNodeLoggerTrace(MatchingNode matchingNode, ShardRouting shard, DiscoveryNode discoNode) {
+        if (matchingNode.isNoopRecovery) {
+            logger.trace("{}: node [{}] can perform a noop recovery", shard, discoNode.getName());
+        } else if (matchingNode.retainingSeqNo >= 0) {
+            logger.trace(
+                "{}: node [{}] can perform operation-based recovery with retaining sequence number [{}]",
+                shard,
+                discoNode.getName(),
+                matchingNode.retainingSeqNo
+            );
+        } else {
+            logger.trace(
+                "{}: node [{}] has [{}/{}] bytes of re-usable data",
+                shard,
+                discoNode.getName(),
+                new ByteSizeValue(matchingNode.matchingBytes),
+                matchingNode.matchingBytes
+            );
+        }
     }
 
     private static long computeMatchingBytes(

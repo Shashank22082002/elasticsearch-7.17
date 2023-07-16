@@ -338,7 +338,7 @@ public class AllocationDeciders extends AllocationDecider {
         return ret;
     }
 
-    public Decision canAllocateReplicaWhenThereIsRetentionLeaseWithSoftLimits(ShardRouting shardRouting, RoutingNode node, RoutingAllocation allocation) {
+    public Decision canAllocateReplicaWhenThereIsRetentionLeaseWithSofterShardLimits(ShardRouting shardRouting, RoutingNode node, RoutingAllocation allocation) {
         if (allocation.shouldIgnoreShardForNode(shardRouting.shardId(), node.nodeId())) {
             return Decision.NO;
         }
